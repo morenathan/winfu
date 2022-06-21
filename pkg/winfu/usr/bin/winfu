@@ -1,0 +1,187 @@
+#!/bin/bash
+
+# NOTE: These functions require wmctrl, xdotool, xprop,
+#       awk, sed
+
+# active_window
+# function : return the active window id
+function active_window () {
+	sed 's/.*\(0x[0-9a-f]\+\),.*/\1/' <(xprop -root _NET_ACTIVE_WINDOW)
+}
+
+# hide_active_window
+# function : hide active window
+# return   : hidden window id
+function hide_active_window () {
+	WINDOW=$(active_window)
+	xdotool getactivewindow windowminimize
+	echo $WINDOW
+}
+
+# current_desktop
+# function : return current desktop number.
+function current_desktop () {
+	sed 's/.*\([0-9]\+\)$/\1/' <(xprop -root _NET_CURRENT_DESKTOP)
+}
+
+# count_desktop
+# function : return number of desktops.
+function count_desktop () {
+	sed 's/.*\([0-9]\+\)$/\1/' <(xprop -root _NET_NUMBER_OF_DESKTOPS)
+}
+
+# get_desktop
+# function : return the number of the desktop after applying delta.
+# $1       : movement delta
+function get_desktop () {
+	COUNT=$(count_desktop)
+	NEW=$(($(current_desktop) + $1))
+	while [[ $NEW -lt 0 ]] || [[ $NEW -ge $COUNT ]]; do
+		if [[ $NEW -lt 0 ]]; then NEW=$(($COUNT + $NEW))
+		elif [[ $NEW -ge $COUNT ]]; then NEW=$((0 + ($NEW - $COUNT)))
+        else NEW=0
+		fi
+	done
+	echo $NEW
+}
+
+# focus_next_desktop
+# function : move focus to next desktop
+function focus_next_desktop () {
+	wmctrl -s $(get_desktop 1)
+}
+
+# focus_previous_desktop
+# function : move focus to previous desktop
+function focus_previous_desktop () {
+	wmctrl -s $(get_desktop -1)
+}
+
+# move_to_next_desktop
+# function : move active window to next desktop and
+#            have focus follow.
+function move_to_next_desktop () {
+	WINDOW=$(xdotool getactivewindow)
+	wmctrl -r :ACTIVE: -t $(get_desktop "1")
+	wmctrl -s $(get_desktop "1")
+	xdotool windowactivate $WINDOW
+}
+
+# move_to_previous_desktop
+# function : move active window to previous desktop
+#            and have focus follow.
+function move_to_previous_desktop () {
+	WINDOW=$(xdotool getactivewindow)
+	wmctrl -r :ACTIVE: -t $(get_desktop "-1")
+	wmctrl -s $(get_desktop "-1")
+	xdotool windowactivate $WINDOW
+}
+
+# get_window_bounds
+# function : return top,right,bottom,left coordinates
+#            of the bounds for active window.
+function get_window_bounds () {
+	# X, Y, WIDTH, HEIGHT <- these are pixel locations
+	eval $(xdotool getactivewindow getwindowgeometry --shell)
+	
+	# LEFT[0], RIGHT[1], TOP[2], BOTTOM[3] <- these are pixel measurements
+	FRAME=($(xprop -id $(active_window) _NET_FRAME_EXTENTS | cut -d'=' -f2 | tr -d ','))
+
+	# convert LEFT, RIGHT, TOP, BOTTOM to pixel locations
+	POSL=$(($X - ${FRAME[0]}))
+	POSR=$(($X + $WIDTH + ${FRAME[1]}))
+	POST=$(($Y - ${FRAME[2]}))
+	POSB=$(($Y + $HEIGHT + ${FRAME[3]}))
+	
+	# return new LEFT, RIGHT, TOP, BOTTOM bounds
+	echo -e "LEFT=$POSL\nRIGHT=$POSR\nTOP=$POST\nBOTTOM=$POSB"
+}
+
+# is_mouse_in_window
+# function : boolean return if mouse is or is not
+#            not in active window
+function is_mouse_in_window () {
+	eval $(xdotool getmouselocation --shell)
+	eval $(get_window_bounds)
+	if [[ $X -ge $LEFT   ]] &&
+	   [[ $X -le $RIGHT  ]] &&
+	   [[ $Y -ge $TOP    ]] &&
+	   [[ $Y -le $BOTTOM ]]
+	then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# warp_mouse
+# function : warp mouse to active window location
+function warp_mouse () {
+	eval $(get_window_bounds)
+	X=$(($LEFT + ($RIGHT - $LEFT) / 2))
+	Y=$(($TOP + ($BOTTOM - $TOP) / 2))
+    xdotool mousemove $X $Y
+}
+
+# warp_mouse_daemon
+# function : warp mouse daemon function
+function warp_mouse_daemon () {
+	while true; do
+		if is_mouse_in_window; then
+			warp_mouse
+		fi
+		sleep 1
+	done
+}
+
+# usage
+# function : print usage statement
+function usage () {
+    cat <<EOF
+USAGE: $(basename $0) <OPTION>
+
+OPTIONS:
+ -H  Hide the active window.
+ 
+ -N  Move window & focus to next desktop.
+ -n  Move focus to next desktop.
+ -P  Move window & focus to previos desktop.
+ -p  Move focus to previous desktop.
+
+ -w  Warp mouse to the center of the active window.
+ -d  Daemonize the warp mouse function.
+ -T  Return true/false if mouse is inside the active window.
+ 
+ -h  This help message.
+EOF
+}
+
+while getopts 'HnNpPwTdh' opt; do
+    case "$opt" in
+    H)	hide_active_window ;;		# hide the current window
+    n)	focus_next_desktop ;;		# focus to the next desktop
+	N)	move_to_next_desktop ;;		# shift active window to next desktop
+    p)	focus_previous_desktop ;;	# focus to the previous desktop
+	P)	move_to_previous_desktop ;;	# shift active window to previous desktop
+	D)  shift						# focus to specified desktop
+		if [[ "$1" -gt -1 ]]; then
+			focus_desktop $1
+		else
+			usage
+		fi ;;
+	w)	warp_mouse ;;				# warp the mouse on demand
+	T)	if is_mouse_in_window; then	# test if mouse position is in active window
+			echo yes
+		else
+			echo no
+		fi
+		;;
+    d)	# start warp mouse daemon
+    	warp_mouse_daemon >/dev/null 2>&1 &
+    	disown
+    	echo "Started warp mouse daemon."
+    	;;
+    *)	usage ;;					# print the usage statement
+    esac
+done
+[[ $OPTIND -eq 1 ]] && usage
